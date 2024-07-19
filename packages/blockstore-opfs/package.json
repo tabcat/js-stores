@@ -152,9 +152,11 @@
     "lint": "aegir lint",
     "build": "aegir build --bundle false",
     "release": "aegir release",
-    "test": "aegir test -t node -t electron-main",
-    "test:node": "aegir test -t node",
-    "test:electron-main": "aegir test -t electron-main",
+    "test": "aegir test -t browser",
+    "test:chrome": "aegir test -t browser",
+    "test:chrome-webworker": "aegir test -t webworker",
+    "test:firefox": "aegir test -t browser -- --browser firefox",
+    "test:firefox-webworker": "aegir test -t webworker -- --browser firefox",
     "dep-check": "aegir dep-check"
   },
   "dependencies": {
