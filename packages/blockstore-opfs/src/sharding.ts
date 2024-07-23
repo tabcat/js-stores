@@ -1,4 +1,3 @@
-import path from 'node:path'
 import { base32upper } from 'multiformats/bases/base32'
 import { CID } from 'multiformats/cid'
 import type { MultibaseCodec } from 'multiformats/bases/interface'
@@ -55,7 +54,9 @@ export class NextToLast implements ShardingStrategy {
   }
 
   decode (str: string): CID {
-    let fileName = path.basename(str)
+    const names = str.split('/')
+
+    let fileName = names[names.length - 1]
 
     if (fileName.endsWith(this.extension)) {
       fileName = fileName.substring(0, fileName.length - this.extension.length)
@@ -106,7 +107,8 @@ export class FlatDirectory implements ShardingStrategy {
   }
 
   decode (str: string): CID {
-    let fileName = path.basename(str)
+    const names = str.split('/')
+    let fileName = names[names.length - 1]
 
     if (fileName.endsWith(this.extension)) {
       fileName = fileName.substring(0, fileName.length - this.extension.length)

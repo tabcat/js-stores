@@ -1,59 +1,28 @@
 /**
  * @packageDocumentation
  *
- * A Blockstore implementation that stores blocks in the local filesystem.
+ * A Blockstore implementation that stores blocks in Origin Private Filesystem.
  *
  * @example
  *
  * ```js
- * import { FsBlockstore } from 'blockstore-fs'
+ * import { OpfsBlockstore } from 'blockstore-opfs'
  *
- * const store = new FsBlockstore('path/to/store')
+ * const store = new OpfsBlockstore('store-name')
  * ```
  */
 
-import fs from 'node:fs/promises'
-import path from 'node:path'
-import { promisify } from 'node:util'
 import {
   Errors
 } from 'blockstore-core'
-// @ts-expect-error no types
-import fwa from 'fast-write-atomic'
-import glob from 'it-glob'
 import map from 'it-map'
 import parallelBatch from 'it-parallel-batch'
-import { NextToLast, type ShardingStrategy } from './sharding.js'
+import { FlatDirectory, NextToLast, type ShardingStrategy } from './sharding.js'
 import type { Blockstore, Pair } from 'interface-blockstore'
 import type { AwaitIterable } from 'interface-store'
 import type { CID } from 'multiformats/cid'
 
-const writeAtomic = promisify(fwa)
-
-/**
- * Write a file atomically
- */
-async function writeFile (file: string, contents: Uint8Array): Promise<void> {
-  try {
-    await writeAtomic(file, contents)
-  } catch (err: any) {
-    if (err.code === 'EPERM' && err.syscall === 'rename') {
-      // fast-write-atomic writes a file to a temp location before renaming it.
-      // On Windows, if the final file already exists this error is thrown.
-      // No such error is thrown on Linux/Mac
-      // Make sure we can read & write to this file
-      await fs.access(file, fs.constants.F_OK | fs.constants.W_OK)
-
-      // The file was created by another context - this means there were
-      // attempts to write the same block by two different function calls
-      return
-    }
-
-    throw err
-  }
-}
-
-export interface FsBlockstoreInit {
+export interface OpfsBlockstoreInit {
   /**
    * If true and the passed blockstore location does not exist, create
    * it on startup. default: true
@@ -96,10 +65,11 @@ export interface FsBlockstoreInit {
 }
 
 /**
- * A blockstore backed by the file system
+ * A blockstore backed by the Origin Private Filesystem
  */
-export class FsBlockstore implements Blockstore {
-  public path: string
+export class OpfsBlockstore implements Blockstore {
+  public name: string
+  private directory: FileSystemDirectoryHandle | null
   private readonly createIfMissing: boolean
   private readonly errorIfExists: boolean
   private readonly putManyConcurrency: number
@@ -107,8 +77,9 @@ export class FsBlockstore implements Blockstore {
   private readonly deleteManyConcurrency: number
   private readonly shardingStrategy: ShardingStrategy
 
-  constructor (location: string, init: FsBlockstoreInit = {}) {
-    this.path = path.resolve(location)
+  constructor (name: string, init: OpfsBlockstoreInit = {}) {
+    this.name = name
+    this.directory = null
     this.createIfMissing = init.createIfMissing ?? true
     this.errorIfExists = init.errorIfExists ?? false
     this.deleteManyConcurrency = init.deleteManyConcurrency ?? 50
@@ -118,19 +89,34 @@ export class FsBlockstore implements Blockstore {
   }
 
   async open (): Promise<void> {
+    let opfsRootDir: FileSystemDirectoryHandle
     try {
-      await fs.access(this.path, fs.constants.F_OK | fs.constants.W_OK)
+      opfsRootDir = await window.navigator.storage.getDirectory()
+    } catch (err: unknown) {
+      throw Errors.openFailedError(new Error('Failed to get root directory of bucket file system. OPFS may not be supported by environment.'))
+    }
+
+    try {
+      const directory = await opfsRootDir.getDirectoryHandle(this.name)
 
       if (this.errorIfExists) {
-        throw Errors.openFailedError(new Error(`Blockstore directory: ${this.path} already exists`))
+        throw Errors.openFailedError(new Error(`Blockstore name: ${this.name} already exists`))
       }
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
-        if (this.createIfMissing) {
-          await fs.mkdir(this.path, { recursive: true })
-          return
-        } else {
-          throw Errors.openFailedError(new Error(`Blockstore directory: ${this.path} does not exist`))
+
+      this.directory = directory
+    } catch (err: unknown) {
+      if (err instanceof DOMException) {
+        if (err.name === 'NotFoundError') {
+          if (!this.createIfMissing) {
+            throw Errors.openFailedError(new Error(`Blockstore name: ${this.name} does not exist`))
+          } else {
+            this.directory = await opfsRootDir.getDirectoryHandle(this.name, { create: true })
+            return
+          }
+        }
+
+        if (err.name === 'TypeMismatchError') {
+          throw Errors.openFailedError(new Error(`Blockstore name: ${this.name} exists but is not a directory`))
         }
       }
 
@@ -139,30 +125,54 @@ export class FsBlockstore implements Blockstore {
   }
 
   async close (): Promise<void> {
-    await Promise.resolve()
+    this.directory = null
+  }
+
+  /**
+   * Does not support path strings atm ('/path/to/dir')
+   * Only supports directory names ('name-of-dir')
+   */
+  async #getParentDirectory (dir?: string): Promise<FileSystemDirectoryHandle> {
+    let directory = this.directory
+
+    if (directory === null) {
+      throw new Error('Blockstore is not open.')
+    }
+
+    if (typeof dir === 'string' && dir !== '') {
+      try {
+        directory = await directory.getDirectoryHandle(dir, { create: true })
+      } catch (err: any) {
+        if (err.name === 'TypeMismatchError') {
+          throw Errors.openFailedError(new Error(`Blockstore directory: ${dir} exists but is not a directory`))
+        }
+
+        throw err
+      }
+    }
+
+    return directory
   }
 
   async put (key: CID, val: Uint8Array): Promise<CID> {
-    const { dir, file } = this.shardingStrategy.encode(key)
+    const { dir, file: name } = this.shardingStrategy.encode(key)
 
     try {
-      if (dir != null && dir !== '') {
-        await fs.mkdir(path.join(this.path, dir), {
-          recursive: true
-        })
-      }
-
-      await writeFile(path.join(this.path, dir, file), val)
-
-      return key
+      const directory = await this.#getParentDirectory(dir)
+      const file = await directory.getFileHandle(name, { create: true })
+      const writeable = await file.createWritable()
+      await writeable.write(val)
+      await writeable.close()
     } catch (err: any) {
       throw Errors.putFailedError(err)
     }
+
+    return key
   }
 
   async * putMany (source: AwaitIterable<Pair>): AsyncIterable<CID> {
     yield * parallelBatch(
-      map(source, ({ cid, block }) => {
+      map(source, ({ cid, block }: Pair) => {
         return async () => {
           await this.put(cid, block)
 
@@ -174,10 +184,19 @@ export class FsBlockstore implements Blockstore {
   }
 
   async get (key: CID): Promise<Uint8Array> {
-    const { dir, file } = this.shardingStrategy.encode(key)
+    const { dir, file: name } = this.shardingStrategy.encode(key)
+
+    let directory: FileSystemDirectoryHandle
+    try {
+      directory = await this.#getParentDirectory(dir)
+    } catch (err: any) {
+      throw Errors.getFailedError(err)
+    }
 
     try {
-      return await fs.readFile(path.join(this.path, dir, file))
+      const fileHandle = await directory.getFileHandle(name)
+      const file = await fileHandle.getFile()
+      return new Uint8Array(await file.arrayBuffer())
     } catch (err: any) {
       throw Errors.notFoundError(err)
     }
@@ -185,7 +204,7 @@ export class FsBlockstore implements Blockstore {
 
   async * getMany (source: AwaitIterable<CID>): AsyncIterable<Pair> {
     yield * parallelBatch(
-      map(source, key => {
+      map(source, (key: CID) => {
         return async () => {
           return {
             cid: key,
@@ -198,12 +217,18 @@ export class FsBlockstore implements Blockstore {
   }
 
   async delete (key: CID): Promise<void> {
-    const { dir, file } = this.shardingStrategy.encode(key)
+    const { dir, file: name } = this.shardingStrategy.encode(key)
 
+    let directory
     try {
-      await fs.unlink(path.join(this.path, dir, file))
+      directory = await this.#getParentDirectory(dir)
+
+      await directory.getFileHandle(name)
+
+      // succeeds regardless if name exists or not, only fails if name is a non-empty directoy
+      await directory.removeEntry(name)
     } catch (err: any) {
-      if (err.code === 'ENOENT') {
+      if (err instanceof DOMException && err.name === 'NotFoundError') {
         return
       }
 
@@ -213,7 +238,7 @@ export class FsBlockstore implements Blockstore {
 
   async * deleteMany (source: AwaitIterable<CID>): AsyncIterable<CID> {
     yield * parallelBatch(
-      map(source, key => {
+      map(source, (key: CID) => {
         return async () => {
           await this.delete(key)
 
@@ -228,39 +253,42 @@ export class FsBlockstore implements Blockstore {
    * Check for the existence of the given key
    */
   async has (key: CID): Promise<boolean> {
-    const { dir, file } = this.shardingStrategy.encode(key)
+    const { dir, file: name } = this.shardingStrategy.encode(key)
 
     try {
-      await fs.access(path.join(this.path, dir, file))
+      const directory = await this.#getParentDirectory(dir)
+      return Boolean(await directory.getFileHandle(name))
     } catch (err: any) {
-      return false
+      if (err instanceof DOMException && err.name === 'NotFoundError') {
+        return false
+      }
+
+      throw Errors.hasFailedError(err)
     }
-    return true
   }
 
   async * getAll (): AsyncIterable<Pair> {
-    const pattern = `**/*${this.shardingStrategy.extension}`
-      .split(path.sep)
-      .join('/')
-    const files = glob(this.path, pattern, {
-      absolute: true
-    })
+    const directory = await this.#getParentDirectory()
 
-    for await (const file of files) {
-      try {
-        const buf = await fs.readFile(file)
+    let directories: AwaitIterable<[string, FileSystemHandle]>
+    if (this.shardingStrategy instanceof NextToLast) {
+      directories = directory.entries()
+    } else if (this.shardingStrategy instanceof FlatDirectory) {
+      directories = [[this.name, directory]]
+    } else {
+      throw new Error('unsupported sharding strategy')
+    }
 
-        const pair: Pair = {
-          cid: this.shardingStrategy.decode(file),
-          block: buf
-        }
-
-        yield pair
-      } catch (err: any) {
-        // if keys are removed from the blockstore while the query is
-        // running, we may encounter missing files.
-        if (err.code !== 'ENOENT') {
-          throw err
+    for await (const [, dirHandle] of directories) {
+      if (dirHandle instanceof FileSystemDirectoryHandle && dirHandle[Symbol.asyncIterator] !== null) {
+        for await (const [name, fileHandle] of dirHandle) {
+          if (fileHandle instanceof FileSystemFileHandle && name.endsWith(this.shardingStrategy.extension) === true) {
+            const file = await fileHandle.getFile()
+            yield {
+              cid: this.shardingStrategy.decode(name),
+              block: new Uint8Array(await file.arrayBuffer())
+            }
+          }
         }
       }
     }
