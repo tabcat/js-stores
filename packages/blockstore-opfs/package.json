@@ -59,7 +59,8 @@
         "tsconfig.json",
         "benchmarks/encoding/tsconfig.json"
       ],
-      "sourceType": "module"
+      "sourceType": "module",
+      "lib": ["DOM"]
     }
   },
   "release": {
