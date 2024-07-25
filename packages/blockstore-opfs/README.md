@@ -3,17 +3,17 @@
 [![codecov](https://img.shields.io/codecov/c/github/ipfs/js-stores.svg?style=flat-square)](https://codecov.io/gh/ipfs/js-stores)
 [![CI](https://img.shields.io/github/actions/workflow/status/ipfs/js-stores/js-test-and-release.yml?branch=main\&style=flat-square)](https://github.com/ipfs/js-stores/actions/workflows/js-test-and-release.yml?query=branch%3Amain)
 
-> Blockstore implementation with file system backend
+> Blockstore implementation with Origin Private Filesystem backend.
 
 # Install
 
 ```console
-$ npm i blockstore-fs
+$ npm i blockstore-opfs
 ```
 
 # API Docs
 
-- <https://ipfs.github.io/js-stores/modules/blockstore_fs.html>
+- <https://ipfs.github.io/js-stores/modules/blockstore_opfs.html>
 
 # License
 
