@@ -282,7 +282,7 @@ export class OpfsBlockstore implements Blockstore {
     for await (const [, dirHandle] of directories) {
       if (dirHandle instanceof FileSystemDirectoryHandle && dirHandle[Symbol.asyncIterator] !== null) {
         for await (const [name, fileHandle] of dirHandle) {
-          if (fileHandle instanceof FileSystemFileHandle && name.endsWith(this.shardingStrategy.extension) === true) {
+          if (fileHandle instanceof FileSystemFileHandle && name.endsWith(this.shardingStrategy.extension)) {
             const file = await fileHandle.getFile()
             yield {
               cid: this.shardingStrategy.decode(name),
